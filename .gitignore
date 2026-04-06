@@ -1,1 +1,43 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# Virtual env
+venv/
+.env/
+
+# Environment variables
+.env
+
+# Logs
+*.log
+
+# Jupyter
+.ipynb_checkpoints/
+
+# OS
+.DS_Store
+
+# IDE
+.vscode/
+.idea/
+
+# RAG / ML data (AJUSTAR SEGÚN TU PROYECTO)
+data/
+datasets/
+models/
+embeddings/
+vectorstore/
+chroma/
+faiss_index/
+
+# Outputs
+outputs/
+cache/
+tmp/
+
+# App data pesada
+appdata/
 infrastructure/appdata
