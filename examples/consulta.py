@@ -13,6 +13,7 @@ EMBEDDING_MODEL_NAME = "nomic-embed-text"
 OLLAMA_BASE_URL = "http://localhost:11434"
 MODEL_NAME1="mistral"
 MODEL_NAME2="phi3"
+MODEL_NAME3="qwen3.5"
 
 # ME CONECTO A LA BD VECTORIAL
 vector_document_store = PgvectorDocumentStore(
