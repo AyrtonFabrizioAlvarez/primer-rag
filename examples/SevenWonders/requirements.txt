@@ -1,3 +1,0 @@
-haystack-ai
-ollama-haystack
-datasets>=2.6.1

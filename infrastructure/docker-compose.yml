@@ -38,6 +38,8 @@ services:
             - pgv_data:/var/lib/postgresql/data
 
     open-webui:
+    #admin@email.com
+    #cualquieradocker compose up --build
         image: 'ghcr.io/open-webui/open-webui:latest'
         restart: unless-stopped
         env_file:
@@ -68,6 +70,20 @@ services:
           - pipelines:/app/pipelines
           - rawdata:/app/pipelines/rawdata
 
+    pgadmin:
+        image: dpage/pgadmin4
+        restart: unless-stopped
+        environment:
+            PGADMIN_DEFAULT_EMAIL: admin@admin.com
+            PGADMIN_DEFAULT_PASSWORD: admin
+        ports:
+            - "5050:80"
+        volumes:
+            - pgadmin_data:/var/lib/pgadmin
+        depends_on:
+            - db
+            - vdb
+
 
 volumes:
     ollama_data:
@@ -94,6 +110,8 @@ volumes:
             type: 'none'
             o: 'bind'
             device: ./appdata/postgress_vector/
+    pgadmin_data:
+        driver: local
     pipelines:
         driver: local
         driver_opts:

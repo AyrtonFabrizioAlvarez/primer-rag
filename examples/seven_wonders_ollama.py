@@ -9,7 +9,9 @@ from haystack_integrations.components.embedders.ollama import OllamaTextEmbedder
 from haystack_integrations.components.embedders.ollama import OllamaDocumentEmbedder
 from haystack_integrations.components.generators.ollama import OllamaGenerator
 
+
 from datasets import load_dataset
+
 
 
 document_store = InMemoryDocumentStore()
