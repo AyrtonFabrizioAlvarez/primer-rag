@@ -39,6 +39,12 @@ outputs/
 cache/
 tmp/
 
-# App data pesada
-appdata/
-infrastructure/appdata
+
+# Ignorar todo appdata
+infrastructure/appdata/**
+
+# Permitir entrar a pipelines
+!infrastructure/appdata/pipelines/
+
+# Permitir SOLO este archivo
+!infrastructure/appdata/pipelines/pipeline.py
