@@ -1,9 +1,9 @@
 """
-title: Seven Wonders RAG (auto-ingest | Ollama + Groq)
+title: Seven Wonders RAG (auto-ingest | Ollama + Groq + NVIDIA)
 author: diuca
-description: Pipeline RAG autocontenido con soporte dual de proveedor LLM.
+description: Pipeline RAG autocontenido con soporte triple de proveedor LLM.
              Embeddings siempre vía Ollama (local). Generación configurable:
-             Ollama (local) o Groq (API gratuita con modelos grandes).
+             Ollama (local), Groq (API gratuita) o NVIDIA Build (API gratuita, modelos grandes).
              La primera vez que se usa, indexa el dataset automáticamente en pgvector.
 requirements: haystack-ai, ollama-haystack, datasets>=2.6.1, pgvector-haystack, openai
 """
@@ -17,22 +17,25 @@ import threading
 class Pipeline:
 
     class Valves(BaseModel):
-        # --- Infraestructura Ollama (siempre necesario para embeddings) ---
+        # --- Ollama (embeddings siempre, generación si LLM_PROVIDER=ollama) ---
         OLLAMA_BASE_URL: str = os.getenv("OLLAMA_BASE_URL", "http://ollama:11434")
+        OLLAMA_GENERATION_MODEL: str = os.getenv("RAG_GENERATION_MODEL", "qwen3.5:9b")
 
         # --- Proveedor de generación ---
-        LLM_PROVIDER: str = os.getenv("RAG_LLM_PROVIDER", "ollama")  # "ollama" | "groq"
+        LLM_PROVIDER: str = os.getenv("RAG_LLM_PROVIDER", "ollama")  # ollama | groq | nvidia
 
-        # --- Modelos ---
+        # --- Embeddings ---
         EMBEDDING_MODEL: str = os.getenv("RAG_EMBEDDING_MODEL", "nomic-embed-text")
-        # Modelo Ollama (solo aplica si LLM_PROVIDER=ollama)
-        OLLAMA_GENERATION_MODEL: str = os.getenv("RAG_GENERATION_MODEL", "mistral:7b")
-        # Modelo Groq (solo aplica si LLM_PROVIDER=groq)
-        GROQ_MODEL: str = os.getenv("RAG_GROQ_MODEL", "llama-3.3-70b-versatile")
 
-        # --- Credenciales Groq ---
+        # --- Groq ---
         GROQ_API_KEY: str = os.getenv("GROQ_API_KEY", "")
+        GROQ_MODEL: str = os.getenv("RAG_GROQ_MODEL", "llama-3.3-70b-versatile")
         GROQ_BASE_URL: str = os.getenv("GROQ_BASE_URL", "https://api.groq.com/openai/v1")
+
+        # --- NVIDIA Build ---
+        NVIDIA_API_KEY: str = os.getenv("NVIDIA_API_KEY", "")
+        NVIDIA_MODEL: str = os.getenv("RAG_NVIDIA_MODEL", "deepseek-ai/deepseek-r1")
+        NVIDIA_BASE_URL: str = os.getenv("NVIDIA_BASE_URL", "https://integrate.api.nvidia.com/v1")
 
         # --- Dataset ---
         DATASET_NAME: str = os.getenv("RAG_DATASET_NAME", "bilgeyucel/seven-wonders")
@@ -60,18 +63,16 @@ class Pipeline:
         self._init_error = None
         self._rag_pipeline = None
         self._document_store = None
-        self._active_provider = None  # guarda cuál proveedor quedó activo
+        self._active_provider = None
         self._init_lock = threading.Lock()
 
     async def on_startup(self):
-        provider = self.valves.LLM_PROVIDER
-        print(f"on_startup:{__name__} | proveedor configurado: {provider}")
+        print(f"on_startup:{__name__} | proveedor configurado: {self.valves.LLM_PROVIDER}")
 
     async def on_shutdown(self):
         print(f"on_shutdown:{__name__}")
 
     async def on_valves_updated(self):
-        """Al cambiar valves desde la UI de OpenWebUI, fuerza reinicialización."""
         with self._init_lock:
             self._ready = False
             self._init_error = None
@@ -83,10 +84,6 @@ class Pipeline:
     # INGESTA AUTOMÁTICA
     # ---------------------------------------------------------------
     def _ingest_if_needed(self, document_store) -> None:
-        """
-        Indexa el dataset en pgvector solo si la tabla está vacía
-        o si FORCE_REINDEX=True. Los embeddings siempre son vía Ollama.
-        """
         from haystack import Pipeline as HaystackPipeline, Document
         from haystack.components.writers import DocumentWriter
         from haystack_integrations.components.embedders.ollama import OllamaDocumentEmbedder
@@ -99,21 +96,12 @@ class Pipeline:
             doc_count = 0
 
         if doc_count > 0 and not self.valves.FORCE_REINDEX:
-            print(
-                f"[RAG] Ingesta omitida: '{self.valves.TABLE_NAME}' "
-                f"ya tiene {doc_count} documentos."
-            )
+            print(f"[RAG] Ingesta omitida: '{self.valves.TABLE_NAME}' ya tiene {doc_count} documentos.")
             return
 
-        print(
-            f"[RAG] Ingestando '{self.valves.DATASET_NAME}' "
-            f"(split='{self.valves.DATASET_SPLIT}') → tabla '{self.valves.TABLE_NAME}'..."
-        )
+        print(f"[RAG] Ingestando '{self.valves.DATASET_NAME}' (split='{self.valves.DATASET_SPLIT}') → '{self.valves.TABLE_NAME}'...")
         dataset = load_dataset(self.valves.DATASET_NAME, split=self.valves.DATASET_SPLIT)
-        documents = [
-            Document(content=d["content"], meta=d["meta"])
-            for d in dataset
-        ]
+        documents = [Document(content=d["content"], meta=d["meta"]) for d in dataset]
         print(f"[RAG] {len(documents)} documentos cargados.")
 
         document_embedder = OllamaDocumentEmbedder(
@@ -129,53 +117,64 @@ class Pipeline:
         index_pipeline.connect("embedder.documents", "writer.documents")
         index_pipeline.run({"embedder": {"documents": documents}})
 
-        print(
-            f"[RAG] Ingesta completa. "
-            f"Total en tabla: {document_store.count_documents()} documentos."
-        )
+        print(f"[RAG] Ingesta completa. Total: {document_store.count_documents()} documentos.")
 
     # ---------------------------------------------------------------
-    # CONSTRUCCIÓN DEL GENERADOR (Ollama o Groq)
+    # CONSTRUCCIÓN DEL GENERADOR
     # ---------------------------------------------------------------
     def _build_generator(self):
+        from haystack.components.generators import OpenAIGenerator
+        from haystack.utils import Secret
+
         provider = self.valves.LLM_PROVIDER.lower().strip()
 
         if provider == "groq":
             if not self.valves.GROQ_API_KEY:
                 raise ValueError(
-                    "LLM_PROVIDER=groq pero GROQ_API_KEY no está definida. "
-                    "Agregala en pipelines.env o en las valves del pipeline."
+                    "LLM_PROVIDER=groq pero GROQ_API_KEY no está definida en pipelines.env."
                 )
-            from haystack.components.generators import OpenAIGenerator
-            from haystack.utils import Secret
-
             print(f"[RAG] Generador: Groq → modelo '{self.valves.GROQ_MODEL}'")
             return OpenAIGenerator(
                 api_key=Secret.from_token(self.valves.GROQ_API_KEY),
                 model=self.valves.GROQ_MODEL,
                 api_base_url=self.valves.GROQ_BASE_URL,
-                generation_kwargs={
-                    "temperature": 0.5,
-                    "max_tokens": 1000,
-                },
+                generation_kwargs={"temperature": 0.5, "max_tokens": 1000},
+            )
+
+        elif provider == "nvidia":
+            if not self.valves.NVIDIA_API_KEY:
+                raise ValueError(
+                    "LLM_PROVIDER=nvidia pero NVIDIA_API_KEY no está definida en pipelines.env."
+                )
+            print(f"[RAG] Generador: NVIDIA Build → modelo '{self.valves.NVIDIA_MODEL}'")
+            return OpenAIGenerator(
+                api_key=Secret.from_token(self.valves.NVIDIA_API_KEY),
+                model=self.valves.NVIDIA_MODEL,
+                api_base_url=self.valves.NVIDIA_BASE_URL,
+                generation_kwargs={"temperature": 0.5, "max_tokens": 1000},
             )
 
         else:  # ollama (default)
             from haystack_integrations.components.generators.ollama import OllamaGenerator
-
-            print(
-                f"[RAG] Generador: Ollama → modelo '{self.valves.OLLAMA_GENERATION_MODEL}' "
-                f"en {self.valves.OLLAMA_BASE_URL}"
-            )
+            print(f"[RAG] Generador: Ollama → modelo '{self.valves.OLLAMA_GENERATION_MODEL}' en {self.valves.OLLAMA_BASE_URL}")
             return OllamaGenerator(
                 model=self.valves.OLLAMA_GENERATION_MODEL,
                 url=self.valves.OLLAMA_BASE_URL,
-                generation_kwargs={
-                    "num_predict": 1000,
-                    "temperature": 0.5,
-                },
+                generation_kwargs={"num_predict": 1000, "temperature": 0.5},
                 timeout=450,
             )
+
+    # ---------------------------------------------------------------
+    # LABEL DEL PROVEEDOR ACTIVO (para mostrar en respuestas)
+    # ---------------------------------------------------------------
+    def _provider_label(self) -> str:
+        p = self._active_provider
+        if p == "groq":
+            return f"Groq / {self.valves.GROQ_MODEL}"
+        elif p == "nvidia":
+            return f"NVIDIA / {self.valves.NVIDIA_MODEL}"
+        else:
+            return f"Ollama / {self.valves.OLLAMA_GENERATION_MODEL}"
 
     # ---------------------------------------------------------------
     # INICIALIZACIÓN COMPLETA DEL PIPELINE
@@ -195,7 +194,6 @@ class Pipeline:
                 from haystack.components.builders import PromptBuilder
                 from haystack_integrations.components.embedders.ollama import OllamaTextEmbedder
 
-                # Vector store
                 document_store = PgvectorDocumentStore(
                     table_name=self.valves.TABLE_NAME,
                     embedding_dimension=self.valves.EMBEDDING_DIMENSION,
@@ -204,23 +202,16 @@ class Pipeline:
                     recreate_table=self.valves.FORCE_REINDEX,
                 )
                 self._document_store = document_store
-
-                # Auto-ingesta si hace falta
                 self._ingest_if_needed(document_store)
 
-                # Embedder para queries (siempre Ollama)
                 text_embedder = OllamaTextEmbedder(
                     model=self.valves.EMBEDDING_MODEL,
                     url=self.valves.OLLAMA_BASE_URL,
                 )
-
-                # Retriever
                 retriever = PgvectorEmbeddingRetriever(
                     document_store=document_store,
                     top_k=self.valves.TOP_K,
                 )
-
-                # Prompt
                 template = """
                     Given the following information, answer the question.
 
@@ -233,12 +224,9 @@ class Pipeline:
                     Answer:
                 """
                 prompt_builder = PromptBuilder(template=template)
-
-                # Generador (Ollama o Groq según config)
                 generator = self._build_generator()
                 self._active_provider = self.valves.LLM_PROVIDER.lower()
 
-                # Ensamblado del pipeline
                 rag_pipeline = HaystackPipeline()
                 rag_pipeline.add_component("text_embedder", text_embedder)
                 rag_pipeline.add_component("retriever", retriever)
@@ -272,23 +260,18 @@ class Pipeline:
         self._ensure_ready()
 
         if self._init_error:
-            proveedor = self.valves.LLM_PROVIDER
-            if proveedor == "groq":
-                hint = (
-                    "Revisá que GROQ_API_KEY esté definida en pipelines.env "
-                    "y que el modelo en RAG_GROQ_MODEL sea válido "
-                    "(ej: llama-3.3-70b-versatile, llama-3.1-8b-instant)."
-                )
-            else:
-                hint = (
-                    "Revisá que Ollama tenga los modelos descargados, "
-                    "que pgvector esté accesible y que PG_CONN_STR esté configurada."
-                )
-            return f"Error inicializando RAG ({proveedor}): {self._init_error}. {hint}"
+            p = self.valves.LLM_PROVIDER
+            hints = {
+                "groq": "Revisá que GROQ_API_KEY esté definida y que RAG_GROQ_MODEL sea válido.",
+                "nvidia": "Revisá que NVIDIA_API_KEY esté definida y que RAG_NVIDIA_MODEL sea válido (ej: meta/llama-3.3-70b-instruct).",
+                "ollama": "Revisá que Ollama tenga el modelo descargado, que pgvector esté accesible y que PG_CONN_STR sea correcta.",
+            }
+            hint = hints.get(p, hints["ollama"])
+            return f"Error inicializando RAG ({p}): {self._init_error}. {hint}"
 
         question = (user_message or "").strip()
         if not question:
-            return "Escribí una pregunta para consultar el RAG de Seven Wonders."
+            return "Escribí una pregunta para consultar el RAG."
 
         try:
             result = self._rag_pipeline.run(
@@ -305,12 +288,7 @@ class Pipeline:
                 return answer
 
             docs = result["retriever"]["documents"]
-            provider_label = (
-                f"Groq / {self.valves.GROQ_MODEL}"
-                if self._active_provider == "groq"
-                else f"Ollama / {self.valves.OLLAMA_GENERATION_MODEL}"
-            )
-            sources = f"\n\n--- SOURCES (via {provider_label}) ---\n"
+            sources = f"\n\n--- SOURCES (via {self._provider_label()}) ---\n"
             for d in docs:
                 sources += f"\n{d.meta}\n{d.content[:300]}...\n"
 
