@@ -84,6 +84,10 @@ class Pipeline:
     # INGESTA AUTOMÁTICA
     # ---------------------------------------------------------------
     def _ingest_if_needed(self, document_store) -> None:
+        """
+        Indexa el dataset en pgvector solo si la tabla está vacía
+        o si FORCE_REINDEX=True. Los embeddings siempre son vía Ollama.
+        """
         from haystack import Pipeline as HaystackPipeline, Document
         from haystack.components.writers import DocumentWriter
         from haystack_integrations.components.embedders.ollama import OllamaDocumentEmbedder
@@ -194,6 +198,7 @@ class Pipeline:
                 from haystack.components.builders import PromptBuilder
                 from haystack_integrations.components.embedders.ollama import OllamaTextEmbedder
 
+                 # Vector store
                 document_store = PgvectorDocumentStore(
                     table_name=self.valves.TABLE_NAME,
                     embedding_dimension=self.valves.EMBEDDING_DIMENSION,
@@ -202,16 +207,23 @@ class Pipeline:
                     recreate_table=self.valves.FORCE_REINDEX,
                 )
                 self._document_store = document_store
+
+                # Auto-ingesta si hace falta
                 self._ingest_if_needed(document_store)
 
+                # Embedder para queries (siempre Ollama)
                 text_embedder = OllamaTextEmbedder(
                     model=self.valves.EMBEDDING_MODEL,
                     url=self.valves.OLLAMA_BASE_URL,
                 )
+
+                # Retriever
                 retriever = PgvectorEmbeddingRetriever(
                     document_store=document_store,
                     top_k=self.valves.TOP_K,
                 )
+
+                # Prompt
                 template = """
                     Given the following information, answer the question.
 
@@ -224,9 +236,12 @@ class Pipeline:
                     Answer:
                 """
                 prompt_builder = PromptBuilder(template=template)
+
+                # Generador (Ollama o Groq según config)
                 generator = self._build_generator()
                 self._active_provider = self.valves.LLM_PROVIDER.lower()
 
+                # Ensamblado del pipeline
                 rag_pipeline = HaystackPipeline()
                 rag_pipeline.add_component("text_embedder", text_embedder)
                 rag_pipeline.add_component("retriever", retriever)

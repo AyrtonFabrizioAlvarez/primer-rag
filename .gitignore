@@ -48,3 +48,5 @@ infrastructure/appdata/**
 
 # Permitir SOLO este archivo
 !infrastructure/appdata/pipelines/pipeline.py
+
+CLAUDE.md
